@@ -29,6 +29,8 @@ import midi
 import mixer
 import plugins
 import transport
+import patterns
+import playlist
 
 
 def _get_script_dir() -> Path:
@@ -88,6 +90,7 @@ def OnIdle():
 def execute_pending_command():
     """Read command from JSON file, execute it, and write response."""
     response = {"success": False, "error": None}
+    request_id = None
 
     try:
         # Read command file
@@ -99,25 +102,35 @@ def execute_pending_command():
         command_text = COMMAND_FILE.read_text()
         command = json.loads(command_text)
 
+        request_id = command.get("request_id")
+        if request_id and request_id == getattr(execute_pending_command, "last_id", None):
+            write_response(execute_pending_command.last_response)
+            return
         action = command.get("action", "")
         params = command.get("params", {})
 
         # Execute command and get result
         result = dispatch_command(action, params)
-        response = {"success": True, **result}
+        response = {"success": not bool(result.get("error")), **result}
 
     except json.JSONDecodeError as e:
         response["error"] = f"Invalid JSON in command file: {e}"
     except Exception as e:
         response["error"] = f"Error executing command: {e}"
 
+    response["request_id"] = request_id
+    if request_id:
+        execute_pending_command.last_id = request_id
+        execute_pending_command.last_response = response
     write_response(response)
 
 
 def write_response(response: dict):
     """Write response to JSON file."""
     try:
-        RESPONSE_FILE.write_text(json.dumps(response, indent=2))
+        # FL 26 embedded Python rejects os.replace. Reader retries partial JSON
+        # and accepts only matching request IDs while holding the mailbox lock.
+        RESPONSE_FILE.write_text(json.dumps(response), encoding="utf-8")
     except Exception as e:
         print(f"Error writing response: {e}")
 
@@ -125,6 +138,60 @@ def write_response(response: dict):
 def dispatch_command(action: str, params: dict) -> dict:
     """Route command to appropriate handler and return result."""
 
+    if action == "patterns.list":
+        return {"selected": patterns.patternNumber(), "patterns": [
+            {"index": i, "name": patterns.getPatternName(i)}
+            for i in range(1, patterns.patternCount() + 1)]}
+    if action == "mixer.setRoute":
+        src, dst = int(params["source"]), int(params["destination"])
+        if src == dst or not (1 <= src < mixer.trackCount() and 0 <= dst < mixer.trackCount()):
+            raise ValueError("Invalid route: source must be an insert and differ from destination")
+        # Refuse a new edge if it would form a direct or indirect feedback loop.
+        pending, visited = ([dst] if params.get("enabled", True) else []), set()
+        while pending:
+            current = pending.pop()
+            if current == src:
+                raise ValueError("Routing would create a feedback loop")
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(i for i in range(mixer.trackCount())
+                           if i != current and mixer.getRouteSendActive(current, i))
+        enabled = bool(params.get("enabled", True))
+        mixer.setRouteTo(src, dst, int(enabled), True)
+        return {"source": src, "destination": dst,
+                "enabled": bool(mixer.getRouteSendActive(src, dst))}
+    # Local, documented API additions for the Cold Truth rebuild.
+    if action == "transport.getTempo":
+        return {"bpm": mixer.getCurrentTempo() / 1000.0}
+    if action == "transport.setTempo":
+        bpm = float(params["bpm"])
+        if not 40 <= bpm <= 240:
+            raise ValueError("Tempo must be between 40 and 240 BPM")
+        mixer.setCurrentTempo(round(bpm * 1000))
+        return {"bpm": mixer.getCurrentTempo() / 1000.0}
+    if action == "patterns.prepare":
+        index = int(params["index"])
+        if not 1 <= index <= 128:
+            raise ValueError("Pattern index out of setup range")
+        patterns.jumpToPattern(index)
+        patterns.setPatternName(index, str(params["name"]))
+        return {"index": patterns.patternNumber(), "name": patterns.getPatternName(index)}
+    if action == "patterns.select":
+        patterns.jumpToPattern(int(params["index"]))
+        return {"index": patterns.patternNumber(), "name": patterns.getPatternName(patterns.patternNumber())}
+    if action == "mixer.setupRebuildRouting":
+        if channels.getChannelName(0, True) != "KICK - HOUSE ANCHOR":
+            raise ValueError("Dedicated rebuild template required")
+        routes = [(i, 13) for i in [1,2,3,4]] + [(i, 14) for i in [5,6,9,10,11,12]] + [(i, 15) for i in [7,8]]
+        for src, dst in routes:
+            mixer.setRouteTo(src, dst, 1, True)
+            mixer.setRouteTo(src, 0, 0, True)
+        return {"routes": [{"source": src, "bus": dst, "bus_active": mixer.getRouteSendActive(src,dst), "direct_to_master": mixer.getRouteSendActive(src,0)} for src,dst in routes]}
+    if action == "channels.showEditor":
+        index = int(params["index"])
+        channels.showEditor(index, 1, True)
+        return {"index": index, "name": channels.getChannelName(index, True)}
     # Transport commands
     if action == "transport.start":
         return handle_transport_start()
@@ -466,7 +533,7 @@ def handle_channels_get_info(params: dict) -> dict:
         "index": index,
         "name": channels.getChannelName(index, use_global),
         "color": hex(channels.getChannelColor(index, use_global)),
-        "volume": channels.getChannelVolume(index, use_global),
+        "volume": channels.getChannelVolume(index, 0, use_global),
         "pan": channels.getChannelPan(index, use_global),
         "pitch": channels.getChannelPitch(index, useGlobalIndex=use_global),
         "is_muted": channels.isChannelMuted(index, use_global) == 1,
@@ -504,7 +571,7 @@ def handle_channels_get_selected() -> dict:
         "channel": {
             "index": index,
             "name": channels.getChannelName(index, True),
-            "volume": channels.getChannelVolume(index, True),
+            "volume": channels.getChannelVolume(index, 0, True),
             "pan": channels.getChannelPan(index, True),
             "is_muted": channels.isChannelMuted(index, True) == 1,
             "is_solo": channels.isChannelSolo(index, True) == 1,
@@ -544,9 +611,9 @@ def handle_channels_set_volume(params: dict) -> dict:
     """Set channel volume."""
     index = params.get("index", 0)
     volume = params.get("volume", 0.8)
-    channels.setChannelVolume(index, volume, True)
+    channels.setChannelVolume(index, volume, 0, True)
     return {
-        "volume": channels.getChannelVolume(index, True),
+        "volume": channels.getChannelVolume(index, 0, True),
         "channel_name": channels.getChannelName(index, True),
     }
 
@@ -555,7 +622,7 @@ def handle_channels_set_pan(params: dict) -> dict:
     """Set channel pan."""
     index = params.get("index", 0)
     pan = params.get("pan", 0.0)
-    channels.setChannelPan(index, pan, True)
+    channels.setChannelPan(index, pan, 0, True)
     return {
         "pan": channels.getChannelPan(index, True),
         "channel_name": channels.getChannelName(index, True),
