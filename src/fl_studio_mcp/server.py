@@ -13,7 +13,7 @@ Requirements:
 
 Limitations:
 - Cannot load new plugins (only control existing ones)
-- Cannot create new patterns programmatically
+- Playlist clip placement and native rendering need GUI assistance
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from fl_studio_mcp.tools import (
     register_plugin_tools,
     register_transport_tools,
 )
+from fl_studio_mcp.tools.audio import register_audio_tools
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
 
 # Create the MCP server
@@ -46,7 +47,7 @@ Available tool categories:
 
 Important limitations:
 1. Cannot load new VST/AU plugins - only control existing ones
-2. Cannot create new patterns programmatically
+2. Playlist placement, plugin loading and native rendering require GUI assistance
 3. Note triggering (fl_trigger_note) is real-time only - notes won't persist
    unless FL Studio is recording. Use step sequencer (fl_set_grid_bit) for
    persistent drum patterns.
@@ -59,8 +60,8 @@ Important limitations:
 def get_fl_status() -> str:
     """Get FL Studio connection status."""
     conn = get_connection()
-    if conn.is_connected:
-        return "Connected to FL Studio via MIDI"
+    if conn.get_status()["connected"]:
+        return "FL Studio responded via MIDI"
     else:
         return f"Not connected: {conn.connection_error}"
 
@@ -108,7 +109,8 @@ def fl_connect() -> str:
         conn.ensure_connected()
     except RuntimeError as e:
         return f"Connection failed: {e}"
-    return "Successfully connected to FL Studio via MIDI!"
+    status = conn.get_status()
+    return "FL Studio responded successfully" if status["connected"] else str(status["error"])
 
 
 @mcp.tool()
@@ -133,6 +135,63 @@ def fl_connection_status() -> dict:
         "error": status.get("error"),
     }
 
+
+@mcp.tool()
+def fl_get_tempo() -> dict:
+    """Read the live FL Studio project tempo."""
+    return get_connection().send_command("transport.getTempo")
+
+
+@mcp.tool()
+def fl_set_tempo(bpm: float) -> dict:
+    """Set project tempo between 40 and 240 BPM and read it back."""
+    return get_connection().send_command("transport.setTempo", {"bpm": bpm})
+
+
+@mcp.tool()
+def fl_prepare_pattern(index: int, name: str) -> dict:
+    """Select/create and name a pattern. Does not clear its existing notes."""
+    return get_connection().send_command("patterns.prepare", {"index": index, "name": name})
+
+
+@mcp.tool()
+def fl_select_pattern(index: int) -> dict:
+    """Select an existing pattern by one-based index."""
+    return get_connection().send_command("patterns.select", {"index": index})
+
+
+@mcp.tool()
+def fl_setup_rebuild_routing() -> dict:
+    """Route the dedicated rebuild template into drum, music and vocal buses.
+
+    Use only in the purpose-built template, never an arbitrary user project.
+    """
+    return get_connection().send_command("mixer.setupRebuildRouting")
+
+
+@mcp.tool()
+def fl_show_channel_editor(index: int) -> dict:
+    """Open an existing channel's editor without loading or changing its plugin."""
+    return get_connection().send_command("channels.showEditor", {"index": index})
+
+
+@mcp.tool()
+def fl_list_patterns() -> dict:
+    """Read names and selection of native patterns from FL Studio."""
+    return get_connection().send_command("patterns.list")
+
+
+@mcp.tool()
+def fl_set_mixer_route(source: int, destination: int, enabled: bool = True) -> dict:
+    """Set one route with feedback prevention and live readback. Other routes remain intact."""
+    return get_connection().send_command(
+        "mixer.setRoute",
+        {"source": source, "destination": destination, "enabled": enabled},
+        timeout=10,
+    )
+
+
+register_audio_tools(mcp)
 
 # Register all tools
 register_transport_tools(mcp)

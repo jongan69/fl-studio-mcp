@@ -14,8 +14,12 @@ instead of keystrokes.
 from __future__ import annotations
 
 import json
+import os
 import platform
+import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,32 @@ def _get_fl_hardware_dir() -> Path:
     return hardware_dir
 
 
+@contextmanager
+def command_lock(path):
+    """Serialize this mailbox across processes; OS releases locks on crash."""
+    with open(path, "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class MIDIConnection:
     """MIDI-based connection to FL Studio.
 
@@ -51,6 +81,7 @@ class MIDIConnection:
         self._port_name: str | None = None
         self._connected = False
         self._error: str | None = None
+        self._thread_lock = threading.Lock()
 
         # File paths for JSON communication
         self._hardware_dir = _get_fl_hardware_dir()
@@ -78,9 +109,7 @@ class MIDIConnection:
         try:
             import mido
         except ImportError:
-            self._error = (
-                "mido library not installed. Install with: pip install mido python-rtmidi"
-            )
+            self._error = "mido library not installed. Install with: pip install mido python-rtmidi"
             return False
 
         # Find available MIDI output ports
@@ -96,21 +125,19 @@ class MIDIConnection:
             )
             return False
 
-        # Look for IAC Driver (Mac) or other virtual MIDI ports
-        target_port = None
-        for port_name in output_ports:
-            # Prefer IAC Driver on Mac
-            if "IAC" in port_name:
-                target_port = port_name
-                break
-            # Also accept loopMIDI on Windows or any port with "FL" in name
-            if "loopMIDI" in port_name or "FL" in port_name.upper():
-                target_port = port_name
-                break
-
-        # If no specific port found, use the first available
-        if target_port is None:
-            target_port = output_ports[0]
+        # Never send control notes into an arbitrary musical device.
+        requested = os.environ.get("FL_MCP_MIDI_PORT")
+        matches = (
+            [p for p in output_ports if p == requested]
+            if requested
+            else [p for p in output_ports if "FLStudioMCP" in p]
+        )
+        if len(matches) != 1:
+            self._error = "Set FL_MCP_MIDI_PORT to one dedicated output port; found: " + repr(
+                matches
+            )
+            return False
+        target_port = matches[0]
 
         try:
             self._port = mido.open_output(target_port)
@@ -137,9 +164,7 @@ class MIDIConnection:
         """Ensure connection to FL Studio is active. Raises RuntimeError if not."""
         if not self.is_connected:
             if not self.connect():
-                raise RuntimeError(
-                    self._error or "Failed to connect to FL Studio via MIDI"
-                )
+                raise RuntimeError(self._error or "Failed to connect to FL Studio via MIDI")
 
     def send_command(
         self,
@@ -161,93 +186,56 @@ class MIDIConnection:
             RuntimeError: If not connected or command fails
         """
         self.ensure_connected()
-
-        # Prepare command
-        command = {
-            "action": action,
-            "params": params or {},
-        }
-
-        # Write command to file
-        try:
-            self._command_file.write_text(json.dumps(command, indent=2))
-        except Exception as e:
-            return {"success": False, "error": f"Failed to write command file: {e}"}
-
-        # Clear old response file
-        if self._response_file.exists():
+        with self._thread_lock, command_lock(self._hardware_dir / "mcp.lock"):
+            request_id = uuid.uuid4().hex
+            command = {"request_id": request_id, "action": action, "params": params or {}}
+            temporary = self._command_file.with_suffix(".tmp")
             try:
-                self._response_file.unlink()
-            except Exception:
-                pass
+                temporary.write_text(json.dumps(command), encoding="utf-8")
+                os.replace(temporary, self._command_file)
+                import mido
 
-        # Send MIDI trigger
-        try:
-            import mido
-            trigger_msg = mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127)
-            self._port.send(trigger_msg)
-        except Exception as e:
-            return {"success": False, "error": f"Failed to send MIDI trigger: {e}"}
+                self._port.send(mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127))
+            except Exception as exc:
+                return {"success": False, "error": str(exc), "request_id": request_id}
+            return self._wait_for_response(timeout, request_id)
 
-        # Wait for response
-        return self._wait_for_response(timeout)
-
-    def _wait_for_response(self, timeout: float) -> dict[str, Any]:
-        """Wait for response file to appear and read it.
-
-        Args:
-            timeout: Maximum time to wait in seconds
-
-        Returns:
-            Response dictionary or error dict if timeout
-        """
-        start_time = time.time()
-        poll_interval = 0.02  # 20ms between checks
-
-        while time.time() - start_time < timeout:
-            if self._response_file.exists():
-                try:
-                    response_text = self._response_file.read_text()
-                    response = json.loads(response_text)
-
-                    # Clean up response file
-                    try:
-                        self._response_file.unlink()
-                    except Exception:
-                        pass
-
+    def _wait_for_response(self, timeout: float, request_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                response = json.loads(self._response_file.read_text(encoding="utf-8"))
+                if isinstance(response, dict) and response.get("request_id") == request_id:
                     return response
-                except json.JSONDecodeError as e:
-                    return {"success": False, "error": f"Invalid JSON in response: {e}"}
-                except Exception as e:
-                    return {"success": False, "error": f"Failed to read response: {e}"}
-
-            time.sleep(poll_interval)
-
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.02)
         return {
             "success": False,
-            "error": (
-                f"Timeout waiting for FL Studio response after {timeout}s. "
-                "Make sure FL Studio is running and the MCP controller is enabled "
-                "in MIDI Settings."
-            ),
+            "request_id": request_id,
+            "error": "No matching FL response. Reload the updated controller; "
+            "check FL Studio and the dedicated MIDI port. Outcome is unknown; "
+            "inspect project before retrying a mutation.",
         }
 
     def get_status(self) -> dict[str, Any]:
         """Get connection status information."""
         try:
             import mido
+
             output_ports = mido.get_output_names()
         except Exception:
             output_ports = []
 
+        reply = self.send_command("transport.getStatus") if self.is_connected else {}
         return {
-            "connected": self.is_connected,
+            "connected": bool(reply.get("success")),
+            "midi_port_open": self.is_connected,
             "port_name": self._port_name,
             "available_ports": output_ports,
             "command_file": str(self._command_file),
             "response_file": str(self._response_file),
-            "error": self._error,
+            "error": self._error or reply.get("error"),
         }
 
 
