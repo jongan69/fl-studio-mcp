@@ -1,3 +1,7 @@
+> **Production fork:** See [PRODUCTION.md](PRODUCTION.md) for tested features, installation,
+> FL 2026 compatibility, and remaining limitations. This is an alpha bridge, not
+> an autonomous mastering or complete DAW replacement. Upstream documentation follows.
+
 # FL Studio MCP Server
 
 **Control FL Studio with plain language.** An MCP (Model Context Protocol) server that lets AI assistants drive FL Studio through MIDI communication and Piano Roll scripts — compose melodies, adjust mixes, and automate plugins without touching the mouse.
