@@ -163,11 +163,48 @@ def measure(path: str) -> dict:
     }
 
 
+def verify_native_export(
+    project: str, export: str, expected_seconds: float, tolerance_seconds: float = 0.1
+) -> dict:
+    """Check a native FL render against the expected song range and project file."""
+    if not math.isfinite(expected_seconds) or expected_seconds <= 0:
+        raise ValueError("Expected duration must be finite and positive")
+    if not math.isfinite(tolerance_seconds) or not 0 <= tolerance_seconds < expected_seconds:
+        raise ValueError("Tolerance must be finite and smaller than the expected duration")
+    source = Path(project).expanduser().resolve(strict=True)
+    if not source.is_file() or source.suffix.lower() != ".flp":
+        raise ValueError("Provide a saved FL Studio project (.flp)")
+    wav = Path(export).expanduser().resolve(strict=True)
+    if wav.suffix.lower() != ".wav":
+        raise ValueError("Provide a native WAV export")
+    report = measure(str(wav))
+    info = report["file"]
+    duration = float(info["format"]["duration"])
+    issues = []
+    if not math.isfinite(duration) or abs(duration - expected_seconds) > tolerance_seconds:
+        issues.append("Export duration differs from the expected song range")
+    if not math.isfinite(report["integrated_lufs"]):
+        issues.append("Export has no measurable program loudness")
+    if wav.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        issues.append("Export predates the saved project")
+    return {
+        "project": str(source),
+        "project_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "expected_seconds": expected_seconds,
+        "actual_seconds": duration,
+        "technical_pass": not issues,
+        "issues": issues,
+        "export": report,
+        "verification": "File checks only; reopen the project and audition the export.",
+    }
+
+
 def register_audio_tools(mcp):
     mcp.tool(name="fl_audio_probe")(probe)
     mcp.tool(name="fl_phrase_timing_plan")(timing_plan)
     mcp.tool(name="fl_prepare_audio_phrase")(prepare_phrase)
     mcp.tool(name="fl_measure_export")(measure)
+    mcp.tool(name="fl_verify_native_export")(verify_native_export)
     mcp.tool(name="fl_export_midi")(export_midi)
     mcp.tool(name="fl_delivery_copies")(delivery_copies)
     mcp.tool(name="fl_check_stems")(check_stems)
