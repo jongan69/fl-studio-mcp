@@ -106,3 +106,9 @@ preservation, source-to-target phrase duration, actual FFmpeg encodes and decode
 MIDI roundtrip, delivery bit depth/bitrate, and overwrite refusal. Live readback
 was tested on FL Studio 26.1.7.5421, macOS Apple Silicon, scripting API 45.
 Windows lock implementation is present but not live-tested.
+
+After rendering in FL, run `fl_verify_native_export` with the saved project,
+the native WAV and the expected song duration including tails. It decodes the WAV,
+reports loudness and peak, and flags stale, silent or wrong-duration exports.
+The project and export hashes identify the files inspected. The checks do not
+prove that the WAV came from that project or that every intended part is audible.
