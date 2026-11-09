@@ -14,6 +14,7 @@ Based on work from https://github.com/calvinw/fl-studio-mcp
 import flpianoroll as flp
 import json
 import os
+import math
 
 
 def get_script_dir():
@@ -67,6 +68,33 @@ def export_piano_roll_state():
     return STATE_FILE
 
 
+def validate_requests(requests):
+    """Preflight the entire queue before any destructive clear or partial add."""
+    allowed = {"clear", "delete_notes", "add_chord", "add_notes"}
+    for request in requests:
+        action = request.get("action")
+        if action not in allowed:
+            raise ValueError("Unknown note action: " + str(action))
+        if action == "clear":
+            continue
+        for note in request.get("notes", []):
+            number = note.get("midi")
+            if type(number) is not int or not 0 <= number <= 127:
+                raise ValueError("MIDI note must be an integer 0..127")
+            time = note.get("time", note.get("offset", 0))
+            if action == "add_chord":
+                time += request.get("time", 0)
+            duration = note.get("duration", request.get("duration", 1))
+            velocity = note.get("velocity", .8)
+            if not all(isinstance(v, (int, float)) and math.isfinite(v)
+                       for v in (time, duration, velocity)):
+                raise ValueError("Note values must be finite numbers")
+            if time < 0 or duration <= 0 or int(duration * flp.score.PPQ) < 1:
+                raise ValueError("Invalid note time or sub-tick duration")
+            if not 0 <= velocity <= 1:
+                raise ValueError("Velocity must be 0..1")
+
+
 def process_mcp_request():
     """Check for and process all requests from the MCP server"""
     if not os.path.exists(REQUEST_FILE):
@@ -88,6 +116,8 @@ def process_mcp_request():
         if not requests:
             return None
 
+        validate_requests(requests)
+
         # Process all requests in order
         total_notes = 0
         notes_deleted = 0
@@ -103,14 +133,20 @@ def process_mcp_request():
                 notes_deleted += count
             elif action == "delete_notes":
                 result = delete_notes_from_piano_roll(request)
+                if result and result.get("status") == "error":
+                    raise RuntimeError(result.get("message", "Note edit failed"))
                 if result and result.get("status") == "success":
                     notes_deleted += result.get("notes_deleted", 0)
             elif action == "add_chord":
                 result = add_chord_to_piano_roll(request)
+                if result and result.get("status") == "error":
+                    raise RuntimeError(result.get("message", "Note edit failed"))
                 if result and result.get("status") == "success":
                     total_notes += result.get("notes_added", 0)
             elif action == "add_notes":
                 result = add_notes_to_piano_roll(request)
+                if result and result.get("status") == "error":
+                    raise RuntimeError(result.get("message", "Note edit failed"))
                 if result and result.get("status") == "success":
                     total_notes += result.get("notes_added", 0)
 

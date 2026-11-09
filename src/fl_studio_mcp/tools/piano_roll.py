@@ -129,7 +129,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
     def fl_send_notes(
         notes: list[dict],
         mode: str = "add",
-        auto_trigger: bool = True
+        auto_trigger: bool = False
     ) -> str:
         """Add or replace notes in the FL Studio piano roll.
 
@@ -198,7 +198,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         time: float = 0,
         duration: float = 1.0,
         velocity: float = 0.8,
-        auto_trigger: bool = True
+        auto_trigger: bool = False
     ) -> str:
         """Add a chord (multiple simultaneous notes) to the FL Studio piano roll.
 
@@ -243,7 +243,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def fl_delete_notes(
         notes: list[dict],
-        auto_trigger: bool = True
+        auto_trigger: bool = False
     ) -> str:
         """Delete specific notes from the FL Studio piano roll.
 
@@ -269,7 +269,7 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         return f"Queued deletion of {len(notes)} note(s).{trigger_info}"
 
     @mcp.tool()
-    def fl_clear_piano_roll(auto_trigger: bool = True) -> str:
+    def fl_clear_piano_roll(auto_trigger: bool = False) -> str:
         """Clear all notes from the FL Studio piano roll.
 
         Args:
