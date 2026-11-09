@@ -190,6 +190,7 @@ class MIDIConnection:
             request_id = uuid.uuid4().hex
             command = {"request_id": request_id, "action": action, "params": params or {}}
             temporary = self._command_file.with_suffix(".tmp")
+            previous_response = self._response_stamp()
             try:
                 temporary.write_text(json.dumps(command), encoding="utf-8")
                 os.replace(temporary, self._command_file)
@@ -198,9 +199,17 @@ class MIDIConnection:
                 self._port.send(mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127))
             except Exception as exc:
                 return {"success": False, "error": str(exc), "request_id": request_id}
-            return self._wait_for_response(timeout, request_id)
+            return self._wait_for_response(timeout, request_id, previous_response)
 
-    def _wait_for_response(self, timeout: float, request_id: str) -> dict[str, Any]:
+    def _response_stamp(self) -> int | None:
+        try:
+            return self._response_file.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _wait_for_response(
+        self, timeout: float, request_id: str, previous_response: int | None = None
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -210,12 +219,20 @@ class MIDIConnection:
             except (OSError, ValueError):
                 pass
             time.sleep(0.02)
+        response_stamp = self._response_stamp()
+        if response_stamp is None:
+            detail = "No readable FL response file exists."
+        elif response_stamp == previous_response:
+            detail = "FL did not update the response file."
+        else:
+            detail = "The FL response file has no reply matching this request."
         return {
             "success": False,
             "request_id": request_id,
-            "error": "No matching FL response. Reload the updated controller; "
-            "check FL Studio and the dedicated MIDI port. Outcome is unknown; "
-            "inspect project before retrying a mutation.",
+            "error": (
+                f"{detail} Check the controller assignment and mailbox paths. "
+                "Outcome is unknown; inspect project before retrying a mutation."
+            ),
         }
 
     def get_status(self) -> dict[str, Any]:

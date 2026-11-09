@@ -127,13 +127,7 @@ def fl_connection_status() -> dict:
         conn.ensure_connected()
     except RuntimeError:
         pass
-    status = conn.get_status()
-    return {
-        "connected": status.get("connected", False),
-        "port_name": status.get("port_name"),
-        "available_ports": status.get("available_ports", []),
-        "error": status.get("error"),
-    }
+    return conn.get_status()
 
 
 @mcp.tool()
