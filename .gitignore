@@ -12,3 +12,4 @@ live-validation.json
 *.wav
 *.mp3
 *.flp
+.DS_Store
